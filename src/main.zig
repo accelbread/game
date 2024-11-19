@@ -17,83 +17,173 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+const std = @import("std");
 const w4 = @import("wasm4.zig");
 const images = @import("images.zig");
+const Entity = @import("Entity.zig");
 
-// Menu items
-const menuItems = [_][]const u8{
-    "New Game",
-    "Load Game",
-    "Exit",
+var tick: u8 = 0;
+
+var prng: std.rand.DefaultPrng = undefined;
+var random: std.rand.Random = undefined;
+
+const init_lane = 1;
+
+var bike: Entity = .{
+    .x = 5,
+    .y = lane_y[init_lane],
+    .type = &Entity.Bike,
+    .velocity = 1,
+    .direction = .left,
 };
 
-var selectedIndex: usize = 0;
-var prev_state: u8 = 0; // Previous gamepad state
+var game_over = false;
 
 // https://lospec.com/palette-list/coral-4
 export fn start() void {
+    prng = std.rand.DefaultPrng.init(0);
+    random = prng.random();
+
     w4.PALETTE.* = .{
         0xffd0a4,
         0xf4949c,
         0x7c9aac,
         0x68518a,
     };
+
+    entities[0] = Entity{
+        .x = 160,
+        .y = lane_y[2],
+        .type = &Entity.Car,
+        .velocity = -1,
+        .direction = .left,
+    };
 }
+
+var prev_input: u8 = 0;
+var input_level: u8 = 0;
+var input_edge: u8 = 0;
 
 export fn update() void {
-    images.person.render(4, 4);
+    tick +%= 1;
 
-    // Handle input for menu navigation
+    input_level = w4.GAMEPAD1.*;
+    input_edge = input_level & (input_level ^ prev_input);
+
+    drawBg();
+
+    if (game_over) {
+        bike.render();
+        for (entities) |slot| {
+            if (slot) |entity| {
+                entity.render();
+            }
+        }
+        return;
+    }
+
+    bg_tick -%= 1;
+
+    spawnEntities();
+
     handleInput();
 
-    // Draw the menu
-    drawMenu();
+    handleEntities();
+
+    prev_input = input_level;
 }
 
-/// Handles input for menu navigation.
+var bg_tick: u8 = 0;
+
+fn drawBg() void {
+    images.map.render(-@as(i32, 256) + bg_tick, 0, false);
+    images.map.render(bg_tick, 0, false);
+}
+
+const lane_y: [6]u8 = .{ 38, 56, 78, 102, 125, 145 };
+var lane: u8 = init_lane;
+
 fn handleInput() void {
-    const gamepad = w4.GAMEPAD1.*;
-    const just_pressed = gamepad & (gamepad ^ prev_state);
-
-    if (just_pressed & w4.BUTTON_UP != 0) {
-        if (selectedIndex == 0) {
-            selectedIndex = menuItems.len - 1;
-        } else {
-            selectedIndex -= 1;
+    if (input_edge & w4.BUTTON_UP != 0) {
+        lane -|= 1;
+        if (lane < 1) {
+            lane = 1;
         }
     }
-    if (just_pressed & w4.BUTTON_DOWN != 0) {
-        if (selectedIndex == menuItems.len - 1) {
-            selectedIndex = 0;
-        } else {
-            selectedIndex += 1;
+    if (input_edge & w4.BUTTON_DOWN != 0) {
+        lane += 1;
+        if (lane > 4) {
+            lane = 4;
         }
     }
-
-    prev_state = gamepad;
+    bike.y = lane_y[lane];
+    bike.velocity = 1;
+    if ((input_level & w4.BUTTON_LEFT != 0) and
+        (bike.x + bike.type.hitbox.x1 > 0))
+    {
+        bike.velocity -= 1;
+    }
+    if ((input_level & w4.BUTTON_RIGHT != 0) and
+        (bike.x + bike.type.hitbox.x2 < 160))
+    {
+        bike.velocity += 1;
+    }
 }
 
-/// Draws a simple menu with selectable items.
-fn drawMenu() void {
-    const startX: i32 = 20;
-    const startY: i32 = 30;
-    const lineHeight: i32 = 12;
+fn spawnEntities() void {
+    if (random.uintAtMost(u8, 25) < 1) {
+        for (&entities) |*slot| {
+            if (slot.* == null) {
+                const entity_type = if (random.uintAtMost(u8, 3) < 3)
+                    &Entity.Car
+                else
+                    &Entity.Truck;
+                const entity_lane = random.uintAtMost(usize, 3) + 1;
+                const left = entity_lane <= 2;
+                var velocity: i8 = 2;
+                if (random.uintAtMost(u8, 10) == 0) {
+                    velocity += 1;
+                }
+                if (left) {
+                    velocity *= -1;
+                }
+                slot.* = Entity{
+                    .type = entity_type,
+                    .x = if (left) 160 else -@as(i32, entity_type.hitbox.x2),
+                    .y = @as(i32, lane_y[entity_lane]) + entity_type.y_offset,
+                    .velocity = velocity,
+                    .direction = if (left) .left else .right,
+                };
 
-    w4.DRAW_COLORS.* = 2;
-
-    for (menuItems, 0..) |item, index| {
-        const yPos = startY + (@as(i32, @intCast(index)) * lineHeight);
-
-        if (index == selectedIndex) {
-            // Highlight with inverted colors
-            w4.DRAW_COLORS.* = 3; // Invert foreground and background
-            w4.rect(startX - 2, yPos - 2, 80, 12); // Background rectangle
-            w4.DRAW_COLORS.* = 1; // Inverted text color
-        } else {
-            w4.DRAW_COLORS.* = 2; // Default color for text
+                return;
+            }
         }
+        w4.trace("Spawn slots full.");
+    }
+}
 
-        // Draw the menu text
-        w4.text(item, startX, yPos);
+var entities: [100]?Entity = .{null} ** 100;
+
+fn handleEntities() void {
+    bike.move();
+    bike.render();
+
+    for (&entities) |*slot| {
+        if (slot.*) |*entity| {
+            entity.move();
+            entity.render();
+            if (bike.collides(entity)) {
+                game_over = true;
+                w4.PALETTE.* = .{
+                    0x68518a,
+                    0x7c9aac,
+                    0xf4949c,
+                    0xffd0a4,
+                };
+            }
+            if (entity.cleanup()) {
+                slot.* = null;
+            }
+        }
     }
 }
